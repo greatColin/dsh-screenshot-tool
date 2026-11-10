@@ -12,7 +12,7 @@
  * composer's upload, preview, retry, and send behaviour stays in charge.
  */
 window.__ModuleLoader__.load({
-  id: '@local/screenshot-tool',
+  id: 'dsh-screenshot-tool',
   factory(require) {
     const React = require('react')
     const ReactDOM = require('react-dom')

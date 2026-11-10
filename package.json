@@ -1,5 +1,5 @@
 {
-  "name": "@local/screenshot-tool",
+  "name": "dsh-screenshot-tool",
   "version": "1.0.0",
   "private": true,
   "type": "module",

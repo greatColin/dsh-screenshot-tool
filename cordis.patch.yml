@@ -1,5 +1,5 @@
-# The Host half captures one display on demand; the Client half is served from
+# The Host half captures every display on demand; the Client half is served from
 # the same package through `dsh.client` in package.json.
 - insert:
     - id: screenshot-tool
-      name: '@local/screenshot-tool'
+      name: 'dsh-screenshot-tool'
