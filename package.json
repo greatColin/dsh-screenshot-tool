@@ -1,0 +1,42 @@
+{
+  "name": "@local/screenshot-tool",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Chat-app-style region screenshot for the DeepSeek Harness web composer: capture any display, pick a region at 1:1, and insert it into the message draft.",
+  "author": "greatColin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/greatColin/dsh-screenshot-tool.git"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "test/*.mjs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}

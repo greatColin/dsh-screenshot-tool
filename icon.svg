@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Screenshot tool">
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="#4D6BFE" fill-opacity="0.12"/>
+  <g fill="none" stroke="#4D6BFE" stroke-width="4.5" stroke-linecap="round">
+    <path d="M20 29v-5.5a3.5 3.5 0 0 1 3.5-3.5H29"/>
+    <path d="M35 20h5.5a3.5 3.5 0 0 1 3.5 3.5V29"/>
+    <path d="M44 35v5.5a3.5 3.5 0 0 1-3.5 3.5H35"/>
+    <path d="M29 44h-5.5A3.5 3.5 0 0 1 20 40.5V35"/>
+  </g>
+  <circle cx="32" cy="32" r="6" fill="#4D6BFE"/>
+</svg>

@@ -1,0 +1,11 @@
+# Dependencies and tooling are recreated by the Harness bundle install.
+node_modules/
+
+# Local capture scratch and test output.
+.cache/
+*.log
+*.png.tmp
+
+# OS noise.
+.DS_Store
+Thumbs.db
