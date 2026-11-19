@@ -2,19 +2,23 @@
  * Host half of the screenshot tool.
  *
  * The composer button runs in the browser, which cannot read the operating
- * system's displays. This half captures every display on demand and hands the
- * PNGs back to the page; the page owns the region picker and the draft
- * attachment, so nothing model-visible is produced here.
+ * system's displays. This half owns two routes: `/pick` freezes every display
+ * and runs `overlay.ps1`, which puts one borderless always-on-top window on each
+ * real screen and returns the confirmed crop; `/capture` hands the same PNGs
+ * back to the page for its own picker when no native overlay is possible. The
+ * draft attachment stays with the page, so nothing model-visible is produced
+ * here.
  *
- * The route asks the composition's `connection` service for a rejection first:
+ * Both routes ask the composition's `connection` service for a rejection first:
  * that fence defeats DNS rebinding and cross-site calls, and its browser
  * authentication gates every caller before any pixels are read.
  */
 
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /** Loader row name. */
 export const name = 'screenshot-tool'
@@ -25,11 +29,26 @@ export const inject = ['webServer', 'connection']
 /** Route the browser half posts to, relative to the Web origin root. */
 const CAPTURE_PATH = '/screenshot-tool/capture'
 
+/** Route that opens the native per-display region picker on this machine. */
+const PICK_PATH = '/screenshot-tool/pick'
+
 /** A capture spawns one shell, grabs every display, encodes, and exits. */
 const CAPTURE_TIMEOUT_MS = 30000
 
+/** The user may browse the frozen screens for a while; this is only a leak guard. */
+const PICK_TIMEOUT_MS = 180000
+
 /** Marker the Windows script prints before its display manifest line. */
 const MANIFEST_MARKER = '__DSH_SCREENS__'
+
+/** Marker the native picker prints before its result line. */
+const PICK_MARKER = '__DSH_PICK__'
+
+/** Label text is displayed in one toolbar; bound what a caller can push at it. */
+const MAX_LABEL_LENGTH = 120
+
+/** The native picker script shipped beside this module. */
+const PICKER_SCRIPT = fileURLToPath(new URL('./overlay.ps1', import.meta.url))
 
 /**
  * Windows capture: enumerate every monitor at its physical pixel size and copy
@@ -159,13 +178,17 @@ function encodeCommand(script) {
   return Buffer.from(script, 'utf16le').toString('base64')
 }
 
-/** Run one child process to completion; reject on spawn failure, non-zero exit, or timeout. */
-function runProcess(file, args, timeoutMs) {
+/**
+ * Run one child process to completion; reject on spawn failure, non-zero exit, or timeout.
+ * @param onSpawn - receives the child, so a caller can abort it when the page goes away.
+ */
+function runProcess(file, args, timeoutMs, onSpawn) {
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     let settled = false
+    if (typeof onSpawn === 'function') onSpawn(child)
     const finish = (error, value) => {
       if (settled) return
       settled = true
@@ -301,10 +324,118 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload))
 }
 
-/** Install the capture route. */
+/** Whether the request came from this machine; only then is a native overlay meaningful. */
+function isLoopback(req) {
+  const address = typeof req.socket?.remoteAddress === 'string' ? req.socket.remoteAddress : ''
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
+}
+
+/**
+ * Whether this Host can put a picker on the user's real screens. A browser on
+ * another machine would only freeze this machine's desktop, so it keeps the
+ * page-side picker instead.
+ */
+function nativePickerAvailable(req) {
+  return process.platform === 'win32' && isLoopback(req)
+}
+
+/** One bounded label string from an untrusted request body. */
+function readLabel(labels, key, fallback) {
+  const value = labels !== null && typeof labels === 'object' ? labels[key] : undefined
+  if (typeof value !== 'string') return fallback
+  const text = value.trim()
+  if (text === '' || text.length > MAX_LABEL_LENGTH) return fallback
+  return text
+}
+
+/** Read a small JSON request body; an absent or malformed body is not an error. */
+function readJsonBody(req) {
+  return new Promise((resolve) => {
+    const chunks = []
+    let size = 0
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > 8192) {
+        finish(undefined)
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      try {
+        finish(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+      } catch {
+        finish(undefined)
+      }
+    })
+    req.on('error', () => { finish(undefined) })
+  })
+}
+
+/** PowerShell that owns the display overlay for the whole selection. */
+function pickerExecutable() {
+  const root = process.env.SystemRoot ?? 'C:\\Windows'
+  return join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+}
+
+/**
+ * Freeze every display, show one native overlay per display, and return the
+ * cropped region the user confirmed.
+ * @param labels - localized toolbar text.
+ * @param onSpawn - receives the child so an abandoned request can kill it.
+ * @returns `{ cancelled: true }` or `{ png, width, height }`.
+ */
+async function pickRegionNatively(labels, onSpawn) {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-screenshot-pick-'))
+  const configPath = join(directory, 'config.json')
+  const outputPath = join(directory, 'region.png')
+  const resultPath = join(directory, 'result.json')
+  await writeFile(configPath, JSON.stringify({ output: outputPath, result: resultPath, labels }), 'utf8')
+  try {
+    const stdout = await runProcess(pickerExecutable(), [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-WindowStyle',
+      'Hidden',
+      '-File',
+      PICKER_SCRIPT,
+      '-Config',
+      configPath,
+    ], PICK_TIMEOUT_MS, onSpawn)
+    const lines = stdout.split(/\r?\n/).filter((line) => line.startsWith(PICK_MARKER))
+    if (lines.length === 0) throw new Error('the picker reported no result')
+    const result = JSON.parse(lines[lines.length - 1].slice(PICK_MARKER.length))
+    if (typeof result !== 'object' || result === null) throw new Error('the picker reported no result')
+    if (typeof result.error === 'string') throw new Error(result.error)
+    if (result.cancelled === true) return { cancelled: true }
+    const png = await readFile(typeof result.file === 'string' ? result.file : outputPath)
+    const size = pngDimensions(png)
+    if (size === undefined) throw new Error('the picker produced no PNG')
+    return { png, width: size.width, height: size.height }
+  } finally {
+    await rm(directory, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+/** Install the capture and native-picker routes. */
 export function apply(ctx) {
   // One capture at a time keeps repeated clicks from spawning competing shells.
   let captureQueue = Promise.resolve()
+  /** Run one capture-shaped task after every earlier one settled. */
+  const enqueue = (task) => {
+    const run = captureQueue.then(task)
+    captureQueue = run.then(() => undefined, () => undefined)
+    return run
+  }
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: CAPTURE_PATH,
@@ -325,11 +456,9 @@ export function apply(ctx) {
       // A page that predates the multi-display protocol asks for one PNG; the
       // active picker asks for every display and their geometry.
       const wantsMultiDisplay = String(req.headers.accept ?? '').includes('application/json')
-      const capture = captureQueue.then(capturePayload)
-      captureQueue = capture.then(() => undefined, () => undefined)
       let payload
       try {
-        payload = await capture
+        payload = await enqueue(capturePayload)
       } catch (error) {
         sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
         return
@@ -352,4 +481,67 @@ export function apply(ctx) {
       sendJson(res, 200, payload)
     },
   }), `screenshot-tool: POST ${CAPTURE_PATH}`)
+
+  // The native half: every display gets its own borderless top-most window, so
+  // the region is picked on the real screen instead of inside the page.
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: PICK_PATH,
+    handler: async (req, res) => {
+      const rejection = ctx.connection.requestRejection(req)
+      if (rejection !== undefined) {
+        res.statusCode = rejection
+        res.end()
+        return
+      }
+      if (req.method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('allow', 'POST')
+        res.end()
+        return
+      }
+      if (!nativePickerAvailable(req)) {
+        // The page keeps its own picker when this machine's screens are not the
+        // ones the user is looking at, or when the platform has no overlay.
+        sendJson(res, 409, { error: 'this Host has no native screen picker' })
+        return
+      }
+      const body = await readJsonBody(req)
+      const labels = {
+        hint: readLabel(body?.labels, 'hint', ''),
+        cancel: readLabel(body?.labels, 'cancel', 'Cancel'),
+        confirm: readLabel(body?.labels, 'confirm', 'Done'),
+      }
+      let child = null
+      let abandoned = false
+      // `req`'s close fires when its body ends, so the response is the abort
+      // signal: a page that navigates away must not leave an overlay behind.
+      res.on('close', () => {
+        if (res.writableEnded) return
+        abandoned = true
+        child?.kill()
+      })
+      let picked
+      try {
+        picked = await enqueue(() => pickRegionNatively(labels, (spawned) => {
+          child = spawned
+          if (abandoned) spawned.kill()
+        }))
+      } catch (error) {
+        if (!abandoned) sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        return
+      }
+      if (abandoned) return
+      if (picked.cancelled) {
+        res.statusCode = 204
+        res.end()
+        return
+      }
+      res.statusCode = 200
+      res.setHeader('content-type', 'image/png')
+      res.setHeader('cache-control', 'no-store')
+      res.setHeader('content-length', String(picked.png.byteLength))
+      res.end(picked.png)
+    },
+  }), `screenshot-tool: POST ${PICK_PATH}`)
 }

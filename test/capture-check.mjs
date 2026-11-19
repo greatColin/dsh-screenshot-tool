@@ -42,10 +42,11 @@ function isPng(bytes) {
 assert.equal(mod.name, 'screenshot-tool')
 assert.deepEqual([...mod.inject].sort(), ['connection', 'webServer'])
 const routes = mount(undefined)
-assert.equal(routes.length, 1)
-const route = routes[0]
+assert.equal(routes.length, 2)
+const route = routes.find((candidate) => candidate.path === '/screenshot-tool/capture')
+const pickRoute = routes.find((candidate) => candidate.path === '/screenshot-tool/pick')
 assert.equal(route.kind, 'exact')
-assert.equal(route.path, '/screenshot-tool/capture')
+assert.equal(pickRoute.kind, 'exact')
 
 // 1. Multi-display protocol: one JSON payload with every display's PNG.
 {
@@ -88,11 +89,34 @@ assert.equal(route.path, '/screenshot-tool/capture')
   assert.equal(result.headers.allow, 'POST')
 
   const rejected = mount(403)
+  const rejectedRoute = rejected.find((candidate) => candidate.path === '/screenshot-tool/capture')
   const { res: rejectedRes, promise: rejectedPromise } = pendingResponse()
-  await rejected[0].handler({ method: 'POST', headers: { accept: 'application/json' }, resume() {} }, rejectedRes)
+  await rejectedRoute.handler({ method: 'POST', headers: { accept: 'application/json' }, resume() {} }, rejectedRes)
   const rejectedResult = await rejectedPromise
   assert.equal(rejectedResult.statusCode, 403)
   console.log('fences: OK (405 for GET, 403 for an untrusted caller)')
+}
+
+// 4. The native picker stays off for a caller that cannot see this machine's
+//    screens, so a remote browser is not frozen behind a window it cannot reach.
+{
+  const { res, promise } = pendingResponse()
+  await pickRoute.handler({
+    method: 'POST',
+    headers: { accept: 'image/png' },
+    socket: { remoteAddress: '10.1.2.3' },
+    resume() {},
+    on() {},
+  }, res)
+  const result = await promise
+  assert.equal(result.statusCode, 409)
+  assert.match(result.body.toString('utf8'), /native screen picker/)
+
+  const { res: getRes, promise: getPromise } = pendingResponse()
+  await pickRoute.handler({ method: 'GET', headers: {}, socket: { remoteAddress: '127.0.0.1' }, on() {} }, getRes)
+  const getResult = await getPromise
+  assert.equal(getResult.statusCode, 405)
+  console.log('native picker: OK (409 for a remote caller, 405 for GET)')
 }
 
 console.log('capture-check: PASS')

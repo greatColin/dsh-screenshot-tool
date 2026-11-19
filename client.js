@@ -2,14 +2,14 @@
  * Client half of the screenshot tool.
  *
  * Adds one round control to the composer tool row, beside the add button. A
- * click asks the Host half for a fresh capture of every display, then opens a
- * chat-app-style region picker: the page enters OS fullscreen so the capture of
- * the display in front of the user is shown one-to-one with the real screen,
- * and the other displays are one Tab (or one pager click) away. Drag to pick
- * any area, Enter or the confirm button to accept, Esc, a right click, or the
- * cancel button to discard. A confirmed region becomes a PNG attachment in the
- * current message draft through the conversation's own draft pipeline, so the
- * composer's upload, preview, retry, and send behaviour stays in charge.
+ * click first asks the Host for its native picker: every display gets its own
+ * borderless always-on-top window showing that display's frozen capture, so the
+ * region is picked on the real screen the way a desktop chat app does it. When
+ * the Host has no native picker (another machine, another platform, an older
+ * Host), the page falls back to its own fullscreen overlay over the same
+ * captures. A confirmed region becomes a PNG attachment in the current message
+ * draft through the conversation's own draft pipeline, so the composer's upload,
+ * preview, retry, and send behaviour stays in charge.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-screenshot-tool',
@@ -20,6 +20,8 @@ window.__ModuleLoader__.load({
 
     /** Host route, relative to the Web origin root. */
     const CAPTURE_ROUTE = 'screenshot-tool/capture'
+    /** Host route that opens a picker window on each real display. */
+    const PICK_ROUTE = 'screenshot-tool/pick'
     /** Locale namespace this plugin owns. */
     const NS = 'screenshotTool'
     /** Above the shell's frame-wide overlay and every host popup. */
@@ -116,6 +118,33 @@ window.__ModuleLoader__.load({
       } catch {
         return true
       }
+    }
+
+    /**
+     * Ask the Host to open its native per-display picker.
+     * @param labels - localized toolbar text.
+     * @returns `{ cancelled }` or `{ blob }`, or null when this Host cannot show one.
+     */
+    async function requestNativePick(labels) {
+      let response
+      try {
+        response = await fetch(PICK_ROUTE, {
+          method: 'POST',
+          headers: { accept: 'image/png', 'content-type': 'application/json' },
+          body: JSON.stringify({ labels }),
+        })
+      } catch {
+        // No route, or the connection dropped: fall back to the page picker.
+        return null
+      }
+      // 404 is a Host that predates this route; 409 is a browser that cannot see
+      // this machine's screens. Both keep the in-page picker.
+      if (response.status === 404 || response.status === 409) return null
+      if (response.status === 204) return { cancelled: true, blob: null }
+      if (!response.ok) return null
+      const mediaType = String(response.headers.get('content-type') ?? '')
+      if (!mediaType.includes('image/png')) return null
+      return { cancelled: false, blob: await response.blob() }
     }
 
     /** Append already-created draft attachment ids to the composer's current draft. */
@@ -612,10 +641,8 @@ window.__ModuleLoader__.load({
         }, [props.inputActions, props.sessionId, t])
 
         /** Capture every display, then open the region picker over the page. */
-        const capture = React.useCallback(async () => {
-          if (busy) return
+        const openPagePicker = React.useCallback(async () => {
           startedFullscreenRef.current = document.fullscreenElement !== null
-          setBusy(true)
           try {
             const response = await fetch(CAPTURE_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
             const mediaType = String(response.headers.get('content-type') ?? '')
@@ -679,11 +706,37 @@ window.__ModuleLoader__.load({
             setShot({ displays, active: initial < 0 ? 0 : initial })
           } catch (cause) {
             if (!startedFullscreenRef.current) exitPickerFullscreen()
+            throw cause
+          }
+        }, [])
+
+        /**
+         * Prefer the Host's native per-display overlay, so the selection happens on
+         * the real screen like a desktop chat app. A Host without it, or a browser
+         * that cannot see this machine's screens, keeps the page picker.
+         */
+        const capture = React.useCallback(async () => {
+          if (busy) return
+          setBusy(true)
+          try {
+            const native = await requestNativePick({
+              hint: t('hint'),
+              cancel: t('cancel'),
+              confirm: t('confirm'),
+            })
+            if (native !== null) {
+              if (native.cancelled) return
+              await attach(native.blob)
+              return
+            }
+            await openPagePicker()
+          } catch (cause) {
+            if (!startedFullscreenRef.current) exitPickerFullscreen()
             showNotice(t('failed', { reason: cause instanceof Error ? cause.message : String(cause) }))
           } finally {
             setBusy(false)
           }
-        }, [busy, showNotice, t])
+        }, [attach, busy, openPagePicker, showNotice, t])
 
         const selectDisplay = React.useCallback((index) => {
           setShot((current) => {
